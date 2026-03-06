@@ -4,9 +4,10 @@ import { log, formatLogMessage } from './utils/log-util.js'
 import { getRedisCaches, judgeRedisValid } from "./utils/redis-util.js";
 import { cleanupExpiredIPs, findUrlById, getCommentCache, getLocalCaches, judgeLocalCacheValid } from "./utils/cache-util.js";
 import { formatDanmuResponse } from "./utils/danmu-util.js";
+import AIClient from './utils/ai-util.js';
 import { getBangumi, getComment, getCommentByUrl, getSegmentComment, matchAnime, searchAnime, searchEpisodes } from "./apis/dandan-api.js";
 import { handleConfig, handleUI, handleLogs, handleClearLogs, handleDeploy, handleClearCache, handleReqRecords } from "./apis/system-api.js";
-import { handleSetEnv, handleAddEnv, handleDelEnv } from "./apis/env-api.js";
+import { handleSetEnv, handleAddEnv, handleDelEnv, handleAiVerify } from "./apis/env-api.js";
 import { Segment } from "./models/dandan-model.js"
 import {
     handleCookieStatus,
@@ -29,8 +30,23 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   globals.deployPlatform = deployPlatform;
   if (deployPlatform === "node") {
     await judgeLocalCacheValid(path, deployPlatform);
+    const { judgeLocalRedisValid } = await import("./utils/local-redis-util.js");
+    await judgeLocalRedisValid(path);
   }
   await judgeRedisValid(path);
+  if (!globals.aiValid && globals.aiBaseUrl && globals.aiModel && globals.aiApiKey && path !== "/favicon.ico" && path !== "/robots.txt") {
+    const ai = new AIClient({
+      baseURL: globals.aiBaseUrl,
+      model: globals.aiModel,
+      apiKey: globals.aiApiKey,
+      systemPrompt: '回答尽量简洁',
+    })
+
+    const status = await ai.verify()
+    if (status.ok) {
+      globals.aiValid = true;
+    }
+  }
 
   log("info", `request url: ${JSON.stringify(url)}`);
   log("info", `request path: ${path}`);
@@ -56,6 +72,10 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   }
   if (globals.redisValid && path !== "/favicon.ico" && path !== "/robots.txt") {
     await getRedisCaches();
+  }
+  if (deployPlatform === "node" && globals.localRedisValid && path !== "/favicon.ico" && path !== "/robots.txt") {
+    const { getLocalRedisCaches } = await import("./utils/local-redis-util.js");
+    await getLocalRedisCaches();
   }
 
   // 检查路径是否包含指定的接口关键字
@@ -206,7 +226,8 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   // 智能处理API路径前缀，确保最终有一个正确的 /api/v2
   if (path !== "/" && path !== "/api/logs" && !path.startsWith('/api/env') 
     && !path.startsWith('/api/deploy') && !path.startsWith('/api/cache')
-    && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')) {
+    && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')
+    && !path.startsWith('/api/ai')) {
       log("info", `[Path Check] Starting path normalization for: "${path}"`);
       const pathBeforeCleanup = path; // 保存清理前的路径检查是否修改
       
@@ -228,7 +249,8 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
       const pathBeforePrefixCheck = path;
       if (!path.startsWith('/api/v2') && path !== '/' && !path.startsWith('/api/logs') 
         && !path.startsWith('/api/env') && !path.startsWith('/api/cache')
-        && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')) {
+        && !path.startsWith('/api/cookie') && !path.startsWith('/api/config')
+        && !path.startsWith('/api/ai')) {
           log("info", `[Path Check] Path is missing /api/v2 prefix. Adding...`);
           path = '/api/v2' + path;
       }
@@ -473,6 +495,11 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   // POST /api/cookie/save - 保存Cookie
   if (path === "/api/cookie/save" && method === "POST") {
     return handleCookieSave(req);
+  }
+
+  // POST /api/ai/verify - 验证AI连通性
+  if (path === "/api/ai/verify" && method === "POST") {
+    return handleAiVerify(req);
   }
 
   return jsonResponse({ message: "Not found" }, 404);
